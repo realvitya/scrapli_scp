@@ -1,0 +1,20 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "scrapli_scp"
+authors = [{name = "Viktor Kertesz", email = "vkertesz2@gmail.com"}]
+classifiers = ["License :: OSI Approved :: MIT License"]
+dynamic = ["description"]
+version = "0.0.1"
+requires-python = ">=3.6"
+readme = "README.rst"
+dependencies = [
+    "scrapli",
+    "asyncssh",
+    "aiofiles",
+]
+
+[project.urls]
+Home = "https://github.com/realvitya/scrapli_scp"
