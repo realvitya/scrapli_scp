@@ -18,7 +18,7 @@ These are the checks done by default:
 
 Requirements
 ------------
-``scrapli``, ``asyncssh``, ``aiofiles``
+``scrapli``, ``scrapli-community``, ``asyncssh``, ``aiofiles``
 
 Installation
 ------------
@@ -36,4 +36,27 @@ You can find it in ``test`` folder but the main part:
     async with AsyncScrapli(**device) as conn:
         scp = AsyncSrapliSCP(conn)
         result = await scp.file_transfer("put", src=filename, dst=".", force_scp_config=True)
+    print(result)
+
+Progress bar example
+--------------------
+
+.. code-block:: python
+
+    from rich.progress import Progress
+
+    with Progress(refresh_per_second=100) as progress:
+        task = progress.add_task("Getting config...")
+
+        def progress_handler(srcpath: bytes, dstpath: bytes, copied: int, total: int):  # arg signature is important!
+            progress.update(task, completed=copied, total=total, description=dstpath.decode())
+
+        async with AsyncScrapli(**device) as conn:
+            scp: AsyncSCPFortiOS = AsyncSrapliSCP(conn)
+            result = await scp.get_config(
+                filename=filename,
+                overwrite=True,
+                force_scp_config=True,
+                progress_handler=progress_handler
+            )
     print(result)

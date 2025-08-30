@@ -3,13 +3,16 @@ from scrapli.driver.network import AsyncNetworkDriver, NetworkDriver
 from scrapli.driver.core import (
     AsyncIOSXEDriver,
 )
+from scrapli_community.fortinet.fortios.async_driver import AsyncFortinetFortiOSDriver
 
 from scrapli_scp.asyncscp.cisco_iosxe import AsyncSCPIOSXE
+from scrapli_scp.asyncscp.fortinet_fortios import AsyncSCPFortiOS
 from scrapli_scp.asyncscp.base import AsyncSCPFeature
 from scrapli_scp.exceptions import ScrapliSCPException
 
 ASYNC_CORE_PLATFORM_MAP = {
     AsyncIOSXEDriver: AsyncSCPIOSXE,
+    AsyncFortinetFortiOSDriver: AsyncSCPFortiOS,
 }
 
 
