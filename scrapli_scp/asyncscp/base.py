@@ -5,9 +5,10 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import PurePath, Path
 from time import time
-from typing import Callable, Literal, Optional, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
+from collections.abc import Callable
 from scrapli.driver.network import AsyncNetworkDriver
 
 import aiofiles
@@ -170,7 +171,7 @@ class AsyncSCPFeature(ABC):
         operation: Literal["get", "put"],
         src: str,
         dst: str,
-        progress_handler: Optional[Callable] = None,
+        progress_handler: Optional[Callable[[str, str, int, int], None]] = None,
         prevent_timeout: Optional[float] = None,
     ) -> bool:
         """
@@ -196,7 +197,7 @@ class AsyncSCPFeature(ABC):
         async def _prevent_timeout():
             """Send ENTER to the idle SSH channel to prevent timing out while transferring the file"""
             logger.debug("Sending keepalive to device")
-            self.conn.transport.write(self.keepalive_pattern)
+            await self.conn.transport.write(self.keepalive_pattern)
 
         def timed_progress_handler(srcpath, dstpath, copied, total):
             """Progress handler wrapper which prevents timeouts while file transfer"""
@@ -212,39 +213,33 @@ class AsyncSCPFeature(ABC):
             if progress_handler:
                 progress_handler(srcpath, dstpath, copied, total)
 
-        # noinspection PyProtectedMember
-        scp_options = SCPConnectionParameterType(
-            username=self.conn.auth_username,
-            password=self.conn.auth_password,
-            port=self.conn.port,
-            host=self.conn.host,
-            options=self.conn.transport.session._options,  # noqa: W0212
-        )
         result = False
         try:
-            async with connect(**scp_options) as scp_conn:
-                start_time = time()
-                if operation == "get":
-                    await scp(
-                        (scp_conn, src),
-                        dst,
-                        progress_handler=timed_progress_handler,
-                        block_size=65536,
-                    )
-                elif operation == "put":
-                    await scp(
-                        src,
-                        (scp_conn, dst),
-                        progress_handler=timed_progress_handler,
-                        block_size=65536,
-                    )
-                else:
-                    raise ValueError(f"Invalid operation: {operation}")
+            start_time = time()
+            if operation == "get":
+                if not Path(dst).parent.is_dir():
+                    raise ValueError(f"Destination directory for '{dst}' does not exist!")
+                await scp(
+                    (self.conn.transport.session, src),
+                    dst,
+                    progress_handler=timed_progress_handler,
+                    block_size=65536,
+                )
+            elif operation == "put":
+                if not Path(src).is_file():
+                    raise ValueError(f"Source file for '{src}' does not exist!")
+                await scp(
+                    src,
+                    (self.conn.transport.session, dst),
+                    progress_handler=timed_progress_handler,
+                    block_size=65536,
+                )
+            else:
+                raise ValueError(f"Invalid operation: {operation}")
+
         except (asyncssh.SFTPError,) as e:
-            result = False
             logger.warning(f"SCP error: {e}")
         except Exception as e:
-            result = False
             logger.warning(f"Other error: {e}")
             raise e
         else:
