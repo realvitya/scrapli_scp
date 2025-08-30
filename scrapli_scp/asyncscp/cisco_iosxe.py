@@ -24,7 +24,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         # ip tcp window-size 65536
         #
         # ip ssh window-size is supported from 16.6.1
-        # 65536 is a recommendation by Cisco
+        # 65,536 is a recommendation by Cisco
         # https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_ssh/configuration/xe-16-6/sec-usr-ssh-xe-16-6-book/sec-usr-ssh-xe-16-book_chapter_0110.html
         window_size = 65536
         output = await self.conn.send_command(
@@ -49,7 +49,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
             if ssh_window < window_size:
                 scp_to_apply.append(f"ip ssh window-size {window_size}")
                 self._scp_to_clean.append(f"ip ssh window-size {ssh_window}")
-            # TCP window is only interesting if SCP window is supported
+            # TCP window is only interesting if the SCP window is supported
             try:
                 tcp_window_str = [x for x in outputs if "ip tcp" in x][0]
             except IndexError:
@@ -65,7 +65,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         if not scp_to_apply:
             return result
 
-        # would need configuration but do we want it?
+        # would need configuration, but do we want it?
         # We require the minimum configuration to proceed (ip scp server enable)
         if not force and "ip scp server enable" in scp_to_apply:
             result = False
