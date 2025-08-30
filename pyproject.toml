@@ -12,8 +12,14 @@ requires-python = ">=3.6"
 readme = "README.rst"
 dependencies = [
     "scrapli",
+    "scrapli-community",
     "asyncssh",
     "aiofiles",
+]
+
+[project.optional-dependencies]
+dev= [
+    "flit >=3.2, <4",
 ]
 
 [project.urls]
