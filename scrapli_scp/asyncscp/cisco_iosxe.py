@@ -36,6 +36,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         result = None
         if force is None:
             return result
+        logger.debug("Ensuring SCP capability is configured..")
         # intended configuration:
         #
         # ip scp server enable
@@ -92,6 +93,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
             return result
 
         # apply SCP enablement
+        logger.info("Applying SCP configuration..")
         output_apply = await self.conn.send_configs(scp_to_apply)
 
         if output_apply.failed:
@@ -110,6 +112,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         # we assume that _scp_to_clean was populated by a previously called _ensure_scp_capability
         if not self._scp_to_clean:
             return
+        logger.info("Cleaning up after SCP transfer..")
         await self.conn.send_configs(self._scp_to_clean)
 
     async def _get_device_fs(self) -> Optional[str]:

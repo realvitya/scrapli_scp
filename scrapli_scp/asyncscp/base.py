@@ -80,7 +80,7 @@ class AsyncSCPFeature(ABC):
 
     def __init__(self, connection: AsyncNetworkDriver):
         # \x0C is CTRL-L that usually refresh the prompt and harmless to send as keepalive
-        self.keepalive_pattern = "\x0C".encode("UTF-8")
+        self.keepalive_pattern = "\x0C"
         self.conn = connection
 
     @abstractmethod
@@ -173,6 +173,7 @@ class AsyncSCPFeature(ABC):
         dst: str,
         progress_handler: Optional[Callable[[str, str, int, int], None]] = None,
         prevent_timeout: Optional[float] = None,
+        block_size: int = 65536,
     ) -> bool:
         """
         SCP a file from device to localhost
@@ -185,57 +186,95 @@ class AsyncSCPFeature(ABC):
             prevent_timeout: interval in seconds when we send an empty command to keep the SSH channel
                              up, 0 to turn it off,
                              default is same as `timeout_ops`
+            block_size: Amount of bytes to transfer at once
 
         Returns:
             bool: True on success
         """
 
-        start_time = 0.0
+        copy_finished = asyncio.Event()
         if prevent_timeout is None:
             prevent_timeout = self.conn.timeout_ops
 
-        async def _prevent_timeout():
-            """Send ENTER to the idle SSH channel to prevent timing out while transferring the file"""
-            logger.debug("Sending keepalive to device")
-            await self.conn.transport.write(self.keepalive_pattern)
+        async def _prevent_timeout(timeout: float):
+            """Send preventive char to the idle SSH channel to prevent timing out while transferring the file"""
+            nonlocal start_time, copy_finished
+            timeout_start = time()
+            while not copy_finished.is_set():
+                await asyncio.sleep(0.5)
+                if not self.conn.isalive():
+                    break
+                if 0 < timeout <= (time() - timeout_start):
+                    logger.debug("Preventing timeout")
+                    self.conn.channel.write(self.keepalive_pattern)
+                    timeout_start = time()
 
-        def timed_progress_handler(srcpath, dstpath, copied, total):
-            """Progress handler wrapper which prevents timeouts while file transfer"""
-            nonlocal start_time
+        def error_handler(exc: Exception):
+            logger.error(f"SCP error: {exc}")
+            raise exc
 
-            now = time()
-            if 0 < prevent_timeout <= (now - start_time):
-                logger.debug("Preventing timeout")
-                asyncio.ensure_future(_prevent_timeout())
-                start_time = now
+        # Helper to run the actual SCP
+        async def _do_scp(conn_obj):
+            if operation == "get":
+                await asyncssh.scp(
+                    (conn_obj, src),
+                    dst,
+                    progress_handler=progress_handler,
+                    block_size=block_size,
+                    error_handler=error_handler,
+                )
+            else:  # put
+                await asyncssh.scp(
+                    src,
+                    (conn_obj, dst),
+                    progress_handler=progress_handler,
+                    block_size=block_size,
+                    error_handler=error_handler,
+                )
 
-            # call the original handler if specified
-            if progress_handler:
-                progress_handler(srcpath, dstpath, copied, total)
+        async def _do_scp_with_keepalive(conn_obj):
+            timeout_task = asyncio.create_task(_prevent_timeout(prevent_timeout))
+            scp_task = asyncio.create_task(_do_scp(conn_obj))
+            try:
+                # Run both concurrently but wait for SCP to finish
+                await scp_task
+            except (asyncio.CancelledError, Exception):
+                # Non-cancellation error: clean up and propagate
+                copy_finished.set()
+                if not timeout_task.done():
+                    timeout_task.cancel()
+                try:
+                    await timeout_task
+                except asyncio.CancelledError:
+                    pass
+                raise
+            finally:
+                # Ensure the keepalive loop exits and the task is cleaned up
+                copy_finished.set()
+                if not timeout_task.done():
+                    timeout_task.cancel()
+                try:
+                    await timeout_task
+                except asyncio.CancelledError:
+                    pass
 
         result = False
         try:
             start_time = time()
-            if operation == "get":
-                if not Path(dst).parent.is_dir():
-                    raise ValueError(f"Destination directory for '{dst}' does not exist!")
-                await scp(
-                    (self.conn.transport.session, src),
-                    dst,
-                    progress_handler=timed_progress_handler,
-                    block_size=65536,
-                )
-            elif operation == "put":
-                if not Path(src).is_file():
-                    raise ValueError(f"Source file for '{src}' does not exist!")
-                await scp(
-                    src,
-                    (self.conn.transport.session, dst),
-                    progress_handler=timed_progress_handler,
-                    block_size=65536,
-                )
-            else:
-                raise ValueError(f"Invalid operation: {operation}")
+            try:
+                await _do_scp_with_keepalive(self.conn.transport.session)
+            except asyncssh.misc.ChannelOpenError as e:
+                logger.debug(f"SCP channel refused on existing session. Falling back to a fresh AsyncSSH connection...")
+                copy_finished.clear()
+                # Open a new AsyncSSH connection directly
+                async with connect(
+                        self.conn.host,
+                        username=self.conn.auth_username,
+                        password=self.conn.auth_password,
+                        options=self.conn.transport.session._options,
+                ) as fresh_conn:
+                    await _do_scp_with_keepalive(fresh_conn)
+            result = True
 
         except (asyncssh.SFTPError,) as e:
             logger.warning(f"SCP error: {e}")
@@ -243,7 +282,8 @@ class AsyncSCPFeature(ABC):
             logger.warning(f"Other error: {e}")
             raise e
         else:
-            result = True
+            elapsed = time() - start_time
+            logger.info(f"SCP {operation} completed in {elapsed:.2f} seconds")
 
         return result
 
@@ -259,6 +299,7 @@ class AsyncSCPFeature(ABC):
         cleanup: bool = True,
         progress_handler: Optional[Callable] = None,
         prevent_timeout: Optional[float] = None,
+        block_size: int = 65536,
     ) -> FileTransferResult:
         """SCP for network devices
 
@@ -295,11 +336,11 @@ class AsyncSCPFeature(ABC):
             progress_handler: function to call by file copy (used by asyncssh.scp function)
             prevent_timeout: interval in seconds when we send an empty command to keep the SSH channel
                              up, 0 to turn it off, default is the same as `timeout_ops`
+            block_size: Amount of bytes to transfer at once (default 32000)
 
         Returns:
             FileTransferResult
         """
-
         result = FileTransferResult(False, False, False)
         src_file_data = FileCheckResult("", 0, 0)
         dst_file_data = FileCheckResult("", 0, 0)
@@ -379,8 +420,12 @@ class AsyncSCPFeature(ABC):
                 dst,
                 progress_handler=progress_handler,
                 prevent_timeout=prevent_timeout,
+                block_size=block_size,
             )
             result.transferred = _transferred
+        except asyncio.CancelledError:
+            logger.error("SCP operation was cancelled!")
+            raise
         except Exception as e:
             raise e
 
