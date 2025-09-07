@@ -161,6 +161,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
                 filename,
                 progress_handler=progress_handler,
                 prevent_timeout=prevent_timeout,
+                block_size=128000,
             )
             result.transferred = _transferred
             result.exists = True
