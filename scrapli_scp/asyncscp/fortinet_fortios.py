@@ -2,8 +2,8 @@
 import re
 import textwrap
 from pathlib import Path
-from typing import Any, List, Optional, Union, Callable
-from scrapli_scp.asyncscp.base import AsyncSCPFeature, FileCheckResult, FileTransferResult
+from typing import Any, Optional, Union, Callable
+from scrapli_scp.asyncscp.base import AsyncSCPFeature, FileTransferResult
 from scrapli_scp.logging import logger
 
 
@@ -57,6 +57,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         Algorithm based on:
         https://community.fortinet.com/t5/FortiGate/Technical-Tip-How-to-download-a-FortiGate-configuration-file-and/ta-p/197125
         https://fortihelp.blogspot.com/2018/12/scp-config-backup-config-restore-and.html
+        https://community.fortinet.com/t5/FortiGate/Technical-Tip-Backing-Up-the-FortiGate-configuration-file-via/ta-p/367088
 
         Args:
             force (Optional[bool]): If True, forces the SCP configuration even if it's already
@@ -86,6 +87,39 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
             result = False
             return result
 
+        logger.debug("Checking SCP capability")
+        # check admin rights after 7.4.4
+        # https://community.fortinet.com/t5/FortiGate/Technical-Tip-Backing-Up-the-FortiGate-configuration-file-via/ta-p/367088
+        output = await self.conn.send_command("get system status | grep ^Version:")
+
+        output_check = await self.conn.send_command(f"get system admin list | grep {self.conn.auth_username}")
+        # [user]    ssh     mgmt:1.1.1.1:22    root  [ADMINPROF]   2.2.2.2:49058     2026-01-30 07:53:51
+        match = re.search(r"\S+\s+\S+\s+\S+\s+\S+\s+(?P<admin_prof>\S+)", output_check.result)
+        admin_prof = match.group("admin_prof")
+        logger.debug("Admin profile detected: %s", admin_prof)
+        if admin_prof != "super_admin":  # no need to check anything more
+            logger.warning(
+                "Backup is not full backup, it may not contain all the information and may not be "
+                "restorable! Please use user with super_admin profile to get full backup!"
+            )
+            match = re.search(r"Version: \S+ v(?P<version>\d+\.\d+\.\d+)", output.result)
+            version = match.group("version")
+            major, minor, patch = (int(x) for x in version.split("."))
+            logger.debug("FortiOS version detected: %s", version)
+            if (major, minor, patch) >= (7, 4, 4):
+                logger.debug("FortiOS version >= 7.4.4 detected, checking admin SCP rights")
+                if admin_prof in ("super_admin_readonly", "admin_no_access"):
+                    logger.error("user '%s' does not have SCP rights!", self.conn.auth_username)
+                    result = False
+                    return result
+                else:
+                    output_prof = await self.conn.send_command(f"show sys accprofile {admin_prof} | grep 'set admin' -B5")
+                    match = re.search(r"(?s)config sysgrp-permission.*\sset admin (?P<right>\S+)", output_prof.result)
+                    if not match or (match and match.group("right") != "read-write"):
+                        logger.error("user '%s' does not have SCP rights!", self.conn.auth_username)
+                        result = False
+                        return result
+
         # apply SCP enablement
         output_apply = await self.conn.send_commands(self._scp_to_apply)
 
@@ -113,6 +147,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
                          cleanup: bool = True,
                          progress_handler: Optional[Callable] = None,
                          prevent_timeout: Optional[float] = None,
+                         sys_config: bool = True,
                          ) -> FileTransferResult:
         """Download configuration from firewall
 
@@ -128,6 +163,8 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
             progress_handler: function to call by file copy (used by asyncssh.scp function)
             prevent_timeout: interval in seconds when we send an empty command to keep the SSH channel
                              up, 0 to turn it off, default is the same as `timeout_ops`
+            sys_config (bool): Get system config which requires local admin user. Remote users can only get limited
+                               backup
 
         Returns:
             (FileTransferResult): Result of transfer
@@ -148,23 +185,27 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
             filename = self.conn.host + ".conf"
 
         if not overwrite and Path(filename).exists():
-            logger.warning(f"'{filename}' file will NOT be overwritten!")
+            logger.warning("'%s' file will NOT be overwritten!", filename)
             result.exists = True
             return result
 
         # transfer the file
-        logger.debug(f"Getting config to '{filename}'")
+        logger.debug("getting config to '%s'", filename)
         try:
             _transferred = await self._async_file_transfer(
                 "get",
-                "fgt-config",
+                "sys_config" if sys_config else "fgt-config",
                 filename,
                 progress_handler=progress_handler,
                 prevent_timeout=prevent_timeout,
                 block_size=128000,
             )
-            result.transferred = _transferred
-            result.exists = True
+            if Path(filename).is_file():  # File created. It's not guaranteed.
+                result.transferred = _transferred
+                result.exists = True
+                logger.debug("'%s' file written", filename)
+            else:
+                logger.warning("'%s' file not created! Check user rights or use sys_config = False!", filename)
         except Exception as e:
             raise e
 

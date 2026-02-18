@@ -7,13 +7,17 @@ import asyncio
 import logging
 from rich.progress import Progress
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%d-%b-%y %H:%M:%S"
+)
 scrapli_logger = logging.getLogger("scrapli")
 scrapli_logger.setLevel(logging.WARNING)
 asyncssh_logger = logging.getLogger("asyncssh")
 asyncssh_logger.setLevel(logging.WARNING)
 scrapli_scp_logger = logging.getLogger("scrapli_scp")
-scrapli_scp_logger.setLevel(logging.INFO)
+scrapli_scp_logger.setLevel(logging.DEBUG)
 
 device = {
     "host": "fg1",
