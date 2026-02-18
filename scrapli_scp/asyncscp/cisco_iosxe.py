@@ -13,10 +13,30 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
     async def _ensure_scp_capability(  # noqa: C901
             self, force: Optional[bool] = False
     ) -> Union[bool, None]:
+        """
+        Ensures the SCP (Secure Copy Protocol) capability is configured correctly on a remote
+        device by sending necessary commands. This can optionally force the configuration update
+        even if SCP is already enabled or partially configured.
+
+        This method interacts with the remote device to check the current SCP, SSH, and TCP
+        window configurations. If they do not align with the intended configuration, the method
+        prepares and sends the required commands. It also handles rollback if the configuration
+        attempt fails.
+
+        Args:
+            force (Optional[bool]): If True, forces the SCP configuration even if it's already
+                enabled. Defaults to False.
+
+        Returns:
+            Union[bool, None]: Returns True if the SCP capability was successfully ensured, False
+                if the operation failed or wasn't allowed due to insufficient permissions and
+                force=False. Returns None if no configuration changes are needed.
+        """
         self._scp_to_clean = []
         result = None
         if force is None:
             return result
+        logger.debug("Ensuring SCP capability is configured..")
         # intended configuration:
         #
         # ip scp server enable
@@ -24,7 +44,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         # ip tcp window-size 65536
         #
         # ip ssh window-size is supported from 16.6.1
-        # 65536 is a recommendation by Cisco
+        # 65,536 is a recommendation by Cisco
         # https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_ssh/configuration/xe-16-6/sec-usr-ssh-xe-16-6-book/sec-usr-ssh-xe-16-book_chapter_0110.html
         window_size = 65536
         output = await self.conn.send_command(
@@ -49,7 +69,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
             if ssh_window < window_size:
                 scp_to_apply.append(f"ip ssh window-size {window_size}")
                 self._scp_to_clean.append(f"ip ssh window-size {ssh_window}")
-            # TCP window is only interesting if SCP window is supported
+            # TCP window is only interesting if the SCP window is supported
             try:
                 tcp_window_str = [x for x in outputs if "ip tcp" in x][0]
             except IndexError:
@@ -65,7 +85,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         if not scp_to_apply:
             return result
 
-        # would need configuration but do we want it?
+        # would need configuration, but do we want it?
         # We require the minimum configuration to proceed (ip scp server enable)
         if not force and "ip scp server enable" in scp_to_apply:
             result = False
@@ -73,6 +93,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
             return result
 
         # apply SCP enablement
+        logger.info("Applying SCP configuration..")
         output_apply = await self.conn.send_configs(scp_to_apply)
 
         if output_apply.failed:
@@ -91,6 +112,7 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         # we assume that _scp_to_clean was populated by a previously called _ensure_scp_capability
         if not self._scp_to_clean:
             return
+        logger.info("Cleaning up after SCP transfer..")
         await self.conn.send_configs(self._scp_to_clean)
 
     async def _get_device_fs(self) -> Optional[str]:
@@ -104,6 +126,24 @@ class AsyncSCPIOSXE(AsyncSCPFeature):
         return None
 
     async def check_device_file(self, device_fs: Optional[str], file_name: str) -> FileCheckResult:
+        """
+        Checks the MD5 hash, size, and available free space of a file on a device.
+
+        This function verifies the integrity of a specified file by computing its MD5 hash
+        and checking its existence based on its attributes like size on the device filesystem.
+        Additionally, it retrieves the amount of free space available on the device filesystem.
+
+        Args:
+            device_fs (Optional[str]): The device filesystem path where the file is located.
+            file_name (str): The name of the file to be checked.
+
+        Returns:
+            FileCheckResult: A named tuple containing the file's MD5 hash, size in bytes,
+            and available free space in bytes.
+
+        Raises:
+            TimeoutError: If the operation exceeds the specified timeout value.
+        """
         logger.debug(f"Checking {device_fs}{file_name} MD5 hash..")
         outputs = await self.conn.send_commands(
             [

@@ -7,13 +7,19 @@ name = "scrapli_scp"
 authors = [{name = "Viktor Kertesz", email = "vkertesz2@gmail.com"}]
 classifiers = ["License :: OSI Approved :: MIT License"]
 dynamic = ["description"]
-version = "0.0.1"
+version = "0.1.0"
 requires-python = ">=3.6"
 readme = "README.rst"
 dependencies = [
     "scrapli",
+    "scrapli-community",
     "asyncssh",
     "aiofiles",
+]
+
+[project.optional-dependencies]
+dev= [
+    "flit >=3.2, <4",
 ]
 
 [project.urls]
