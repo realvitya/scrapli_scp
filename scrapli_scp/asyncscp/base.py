@@ -13,7 +13,7 @@ from scrapli.driver.network import AsyncNetworkDriver
 
 import aiofiles
 import asyncssh
-from asyncssh import SSHClientConnectionOptions, connect, scp
+from asyncssh import SSHClientConnectionOptions, connect
 from scrapli_scp.logging import logger
 
 
