@@ -27,6 +27,7 @@ device = {
     "transport": "asyncssh",
     "ssh_config_file": "sshconfig.txt",
     "platform": "fortinet_fortios",
+    "channel_log": "forti-channel.log",
 }
 
 filename = ""

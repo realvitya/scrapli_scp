@@ -3,6 +3,9 @@ import re
 import textwrap
 from pathlib import Path
 from typing import Any, Optional, Union, Callable
+
+from scrapli_community.fortinet.fortios.async_driver import AsyncFortinetFortiOSDriver
+
 from scrapli_scp.asyncscp.base import AsyncSCPFeature, FileTransferResult
 from scrapli_scp.logging import logger
 
@@ -20,6 +23,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
                 unset admin-scp
             end
         """).splitlines()
+        self.conn: AsyncFortinetFortiOSDriver
         super().__init__(*args, **kwargs)
 
     async def file_transfer(self):
@@ -77,6 +81,8 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         # config system global
         #     set admin-scp enable
         # end
+
+        await self.conn.context("global")  # change to global context if in multi-VDOM mode
 
         output = await self.conn.send_command("get system global | grep admin-scp")
         if re.search(r"admin-scp\s*:\s*disable", output.result):  # not enabled
@@ -138,6 +144,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         # we assume that _scp_to_clean was populated by a previously called _ensure_scp_capability
         if not self._need_scp_config:
             return
+        await self.conn.context("global")  # change to global context if in multi-VDOM mode
         await self.conn.send_commands(self._scp_to_clean)
 
     async def get_config(self,
