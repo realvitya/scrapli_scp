@@ -18,7 +18,10 @@ These are the checks done by default:
 
 Requirements
 ------------
-``scrapli``, ``scrapli-community``, ``asyncssh``, ``aiofiles``
+``scrapli<2026.11.12``, ``scrapli-community``, ``asyncssh``, ``aiofiles``
+
+Scrapli 2026.11.12 removed the ``scrapli.driver`` module used by this project.
+Scrapli 2025.1.30 and 2026.2.20 have been checked with the regression tests.
 
 Installation
 ------------
@@ -37,6 +40,41 @@ You can find it in ``test`` folder but the main part:
         scp = AsyncSrapliSCP(conn)
         result = await scp.file_transfer("put", src=filename, dst=".", force_scp_config=True)
     print(result)
+
+FortiOS configuration in memory
+------------------------------
+
+Pass a writable ``StringIO`` or ``TextIOWrapper`` as ``filename`` to receive the
+configuration as text. Downloads use ``asyncssh.scp()`` with an anonymous
+memory-backed file on Linux when ``os.memfd_create`` is available. Windows and
+systems without that function use a temporary file in a unique directory.
+If creating or downloading to the memory file fails, the download is retried
+once using a temporary file. Errors writing to the caller's stream still propagate.
+UTF-8 decoded text is then copied into the stream. Both approaches isolate
+concurrent downloads; use a separate output stream for each call. Internal
+storage is released on success, failure, or cancellation. Progress callbacks
+receive the internal download path as their destination.
+Device setup, transfer, and restoration are serialized on each driver;
+separate drivers can download concurrently. Cancellation waits for active file
+operations and cleanup to finish before returning, so callers can safely close
+their output streams afterward. Device restoration also runs after a failed
+or cancelled transfer when ``cleanup=True``.
+With temporary files, the configuration briefly exists on disk. Linux memory files can
+be swapped to disk by the operating system.
+The stream stays open at the end of the written text; ``overwrite`` only applies to paths.
+On a failed transfer the stream may contain partial configuration; check
+``result.transferred`` before using it.
+
+.. code-block:: python
+
+    from io import StringIO
+
+    async with AsyncScrapli(**device) as conn:
+        scp = AsyncSrapliSCP(conn)
+        with StringIO() as output:
+            result = await scp.get_config(filename=output)
+            if result.transferred:
+                config = output.getvalue()
 
 Progress bar example
 --------------------

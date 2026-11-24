@@ -1,17 +1,41 @@
 """scrapli_scp.asyncssh.fortinet_fortios"""
+import asyncio
+import os
 import re
+import shutil
 import textwrap
+from contextlib import AsyncExitStack
+from io import TextIOBase
 from pathlib import Path
-from typing import Any, Optional, Union, Callable
+from typing import Any, Optional, Union, Callable, TextIO
 
+from aiofiles.tempfile import TemporaryDirectory
 from scrapli_community.fortinet.fortios.async_driver import AsyncFortinetFortiOSDriver
 
 from scrapli_scp.asyncscp.base import AsyncSCPFeature, FileTransferResult
 from scrapli_scp.logging import logger
 
 
+async def _finish_before_cancelling(awaitable):
+    """Let resource-owning work finish before propagating cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    try:
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    return task.result()
+    finally:
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 class AsyncSCPFortiOS(AsyncSCPFeature):
     def __init__(self, *args: Any, **kwargs: Any):
+        self._transfer_lock = asyncio.Lock()
         self._need_scp_config: bool = False
         self._scp_to_apply = textwrap.dedent("""\
             config system global
@@ -85,8 +109,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         await self.conn.context("global")  # change to global context if in multi-VDOM mode
 
         output = await self.conn.send_command("get system global | grep admin-scp")
-        if re.search(r"admin-scp\s*:\s*disable", output.result):  # not enabled
-            self._need_scp_config = True
+        self._need_scp_config = bool(re.search(r"admin-scp\s*:\s*disable", output.result))
 
         # would need configuration, but do we want it?
         if not force and self._need_scp_config:
@@ -148,7 +171,7 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         await self.conn.send_commands(self._scp_to_clean)
 
     async def get_config(self,
-                         filename: str = "",
+                         filename: Union[str, TextIO] = "",
                          overwrite: bool = False,
                          force_scp_config: bool = False,
                          cleanup: bool = True,
@@ -159,15 +182,20 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
         """Download configuration from firewall
 
         Args:
-            filename: output filename with configuration
-            overwrite: If set to `True`, will overwrite the existing file
+            filename: output filename or writable text stream (TextIOWrapper or StringIO).
+                      Streams receive UTF-8 decoded text at the current position and remain open.
+                      Uses an anonymous memory file on Linux when memfd_create is available,
+                      otherwise a temporary file. A failed memory download is retried once
+                      using a temporary file. Storage is released afterward.
+            overwrite: If set to `True`, will overwrite the existing file. Ignored for streams.
             force_scp_config: If set to `True`, SCP function will be enabled in the device configuration before transfer.
                               If set to `False`, SCP functionality will be checked but won't
                               configure the device.
                               If set to `None`, capability won't be checked.
             cleanup: If set to True, call the cleanup procedure to restore configuration if it was
                      altered
-            progress_handler: function to call by file copy (used by asyncssh.scp function)
+            progress_handler: function to call by file copy (used by asyncssh.scp function).
+                              For streams, the destination path is the internal download path.
             prevent_timeout: interval in seconds when we send an empty command to keep the SSH channel
                              up, 0 to turn it off, default is the same as `timeout_ops`
             sys_config (bool): Get system config which requires local admin user. Remote users can only get limited
@@ -178,45 +206,106 @@ class AsyncSCPFortiOS(AsyncSCPFeature):
 
         Notes:
             No checksum nor destination space check is performed!
+            Transfers on the same driver serialize device setup and cleanup.
+            Cancellation waits for active file operations and cleanup to finish.
         """
-        result = FileTransferResult(False, False, False)
-        # check if we are capable of transferring files
-        scp_capability = await self._ensure_scp_capability(force=force_scp_config)
-        if scp_capability is False:
-            logger.error("SCP feature is not enabled on device!")
-            return result
+        if isinstance(filename, TextIOBase):
+            memfd_create = getattr(os, "memfd_create", None)
+            for use_memory in (True, False):
+                if use_memory and memfd_create is None:
+                    continue
+                stack = AsyncExitStack()
+                try:
+                    try:
+                        if use_memory:
+                            fd = memfd_create("scrapli-scp")
+                            stack.callback(os.close, fd)
+                            destination = f"/proc/self/fd/{fd}"
+                        else:
+                            directory = await _finish_before_cancelling(
+                                stack.enter_async_context(TemporaryDirectory(prefix="scrapli-scp-"))
+                            )
+                            destination = str(Path(directory) / "config.conf")
 
-        _need_to_cleanup = scp_capability
+                        received = False
 
-        if not filename:  # default to the current directory with hostname as filename
-            filename = self.conn.host + ".conf"
+                        def track_progress(src, dst, copied, total):
+                            nonlocal received
+                            received = copied == total
+                            if progress_handler:
+                                progress_handler(src, dst, copied, total)
 
-        if not overwrite and Path(filename).exists():
-            logger.warning("'%s' file will NOT be overwritten!", filename)
-            result.exists = True
-            return result
+                        result = await self.get_config(
+                            filename=destination,
+                            overwrite=True,
+                            force_scp_config=force_scp_config,
+                            cleanup=cleanup,
+                            progress_handler=track_progress,
+                            prevent_timeout=prevent_timeout,
+                            sys_config=sys_config,
+                        )
+                        # An anonymous memory file exists even when SCP sends no file.
+                        result.transferred = result.transferred and received
+                    except OSError:
+                        if not use_memory:
+                            raise
+                        result = FileTransferResult(False, False, False)
 
-        # transfer the file
-        logger.debug("getting config to '%s'", filename)
-        try:
-            _transferred = await self._async_file_transfer(
-                "get",
-                "sys_config" if sys_config else "fgt-config",
-                filename,
-                progress_handler=progress_handler,
-                prevent_timeout=prevent_timeout,
-                block_size=128000,
-            )
-            if Path(filename).is_file():  # File created. It's not guaranteed.
-                result.transferred = _transferred
-                result.exists = True
-                logger.debug("'%s' file written", filename)
-            else:
-                logger.warning("'%s' file not created! Check user rights or use sys_config = False!", filename)
-        except Exception as e:
-            raise e
+                    if use_memory and not result.transferred:
+                        logger.debug("Memory-backed download failed; retrying with a temporary file")
+                        continue
+                    if result.transferred:
+                        def copy_config():
+                            with open(destination, "r", encoding="utf-8", newline="") as source:
+                                shutil.copyfileobj(source, filename, length=128000)
+                            filename.flush()
 
-        if cleanup and _need_to_cleanup:
-            await self._cleanup_after_transfer()
+                        await _finish_before_cancelling(
+                            asyncio.get_running_loop().run_in_executor(None, copy_config)
+                        )
+                    return result
+                finally:
+                    await _finish_before_cancelling(stack.aclose())
 
-        return result
+        async with self._transfer_lock:
+            result = FileTransferResult(False, False, False)
+            setup = asyncio.create_task(self._ensure_scp_capability(force=force_scp_config))
+            try:
+                scp_capability = await _finish_before_cancelling(setup)
+                if scp_capability is False:
+                    logger.error("SCP feature is not enabled on device!")
+                    return result
+
+                if not filename:
+                    filename = self.conn.host + ".conf"
+
+                if not overwrite and Path(filename).exists():
+                    logger.warning("'%s' file will NOT be overwritten!", filename)
+                    result.exists = True
+                    return result
+
+                logger.debug("getting config to '%s'", filename)
+                transfer = asyncio.create_task(self._async_file_transfer(
+                    "get",
+                    "sys_config" if sys_config else "fgt-config",
+                    filename,
+                    progress_handler=progress_handler,
+                    prevent_timeout=prevent_timeout,
+                    block_size=128000,
+                ))
+                try:
+                    transferred = await asyncio.shield(transfer)
+                except asyncio.CancelledError:
+                    transfer.cancel()
+                    await _finish_before_cancelling(transfer)
+                    raise
+                if Path(filename).is_file():
+                    result.transferred = transferred
+                    result.exists = True
+                    logger.debug("'%s' file written", filename)
+                else:
+                    logger.warning("'%s' file not created! Check user rights or use sys_config = False!", filename)
+                return result
+            finally:
+                if cleanup and not setup.cancelled() and setup.exception() is None and setup.result():
+                    await _finish_before_cancelling(self._cleanup_after_transfer())

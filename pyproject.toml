@@ -11,6 +11,7 @@ version = "0.1.1"
 requires-python = ">=3.6"
 readme = "README.rst"
 dependencies = [
+    "scrapli<2026.11.12",
     "scrapli-community",
     "asyncssh",
     "aiofiles",
@@ -23,3 +24,8 @@ dev= [
 
 [project.urls]
 Home = "https://github.com/realvitya/scrapli_scp"
+
+[dependency-groups]
+dev = [
+    "flit >=3.2, <4",
+]
